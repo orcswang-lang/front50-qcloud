@@ -1,7 +1,5 @@
 # front50-qcloud
-spinnaker front50-qcloud
-
-spinnaker front50 腾讯云存储
+spinnaker front50 腾讯云存储(cos)
 
 qcloud:
   enabled: true
