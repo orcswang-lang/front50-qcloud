@@ -21,7 +21,9 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -54,7 +56,7 @@ public class QcloudStorageService implements StorageService {
     // 设置秘钥
     COSCredentials cred = new BasicCOSCredentials(qcloudStorageProperties.getStorageAppId(),
       qcloudStorageProperties.getQcloudSecretId(), qcloudStorageProperties.getQcloudSecretKey());
-    // 设置区域, 这里设置为北京一区
+    // 设置区域, 这里设置为上海一区
     ClientConfig clientConfig = new ClientConfig(new Region(this.region));
     // 生成cos客户端对象
     this.cosClient = new COSClient(cred, clientConfig);
@@ -68,7 +70,7 @@ public class QcloudStorageService implements StorageService {
     } catch (CosServiceException e) {
       if (e.getStatusCode() == 404) {
         if (StringUtils.isNullOrEmpty(region)) {
-          log.info("Creating bucket {} in default region", value("bucket", bucketName));
+          log.info("Qcloud Cos Creating bucket {} in default region", value("bucket", bucketName));
           this.cosClient.createBucket(bucketName);
         } else {
           log.info("Creating bucket {} in region {}",
@@ -106,11 +108,11 @@ public class QcloudStorageService implements StorageService {
       return item;
     } catch (CosServiceException e) {
       if (e.getStatusCode() == 404) {
-        throw new NotFoundException("Object not found (key: " + objectKey + ")");
+        throw new NotFoundException("Qcloud Cos Object not found (key: " + objectKey + ")");
       }
       throw e;
     } catch (IOException e) {
-      throw new IllegalStateException("Unable to deserialize object (key: " + objectKey + ")", e);
+      throw new IllegalStateException("Qcloud Cos Unable to deserialize object (key: " + objectKey + ")", e);
     }
   }
 
@@ -125,9 +127,10 @@ public class QcloudStorageService implements StorageService {
     try {
       DeleteObjectRequest deleteObjectRequest = new DeleteObjectRequest(bucketName, key);
       cosClient.deleteObject(deleteObjectRequest);
-      log.info("The delete Cos object is succeed.");
+      writeLastModified(objectType.group);
+      log.info("The delete Qcloud Cos object is succeed.");
     } catch (CosClientException cle) {
-      log.error("del Cos object failed.", cle);
+      log.error("Del Qcloud Cos object failed.", cle);
       throw new CosClientException(cle);
     }
   }
@@ -159,14 +162,15 @@ public class QcloudStorageService implements StorageService {
       // 等待传输结束
       upload.waitForCompletion();
       transferManager.shutdownNow();
-      log.info("{} object {} for  upload status:{}.",
+      writeLastModified(objectType.group);
+      log.info("Qcloud Cos {} object {} for  upload status:{}.",
         value("group", objectType.group),
         value("key", key),
         upload.getState().toString());
     } catch (CosClientException se) {
       logStorageException(se, key);
     }catch (Exception e) {
-      log.error("Failed to retrieve {} object: {}: {}",
+      log.error("Qcloud Cos Failed to retrieve {} object: {}: {}",
         value("group", objectType.group),
         value("key", key),
         value("exception", e.getMessage()));
@@ -204,7 +208,7 @@ public class QcloudStorageService implements StorageService {
       objectListing = this.cosClient.listNextBatchOfObjects(objectListing);
       objectSummaries.addAll(objectListing.getObjectSummaries());
     }
-    log.info("Took {}ms to fetch {} object keys for {}",
+    log.info("Qcloud Cos Took {}ms to fetch {} object keys for {}",
       value("fetchTime", (System.currentTimeMillis() - startTime)),
       objectSummaries.size(),
       value("type", objectType.group));
@@ -221,13 +225,63 @@ public class QcloudStorageService implements StorageService {
   }
 
   /**
-   * 获取最后修改
+   * 获取最后修改时间
    * @param objectType
    * @return
    */
   @Override
   public long getLastModified(ObjectType objectType) {
-    return 0;
+    try {
+      Map<String, Long> lastModified = objectMapper.readValue(
+        this.cosClient.getObject(this.bucketName, buildTypedFolder(rootFolder, objectType.group) + "/last-modified.json").getObjectContent(),
+        Map.class
+      );
+      return lastModified.get("lastModified");
+    } catch (Exception e) {
+      return 0L;
+    }
+  }
+
+
+  @Override
+  public long getHealthIntervalMillis() {
+    return Duration.ofSeconds(2).toMillis();
+  }
+
+  /**
+   * 写入最后修改时间
+   * @param group
+   */
+  private void writeLastModified(String group) {
+    String key = buildTypedFolder(rootFolder, group) + "/last-modified.json";
+    try {
+      byte[] bytes = objectMapper.writeValueAsBytes(Collections.singletonMap("lastModified", System.currentTimeMillis()));
+      InputStream inputStream = new ByteArrayInputStream(bytes);
+
+      // 上传文件(推荐), 支持根据文件的大小自动选择单文件上传或者分块上传
+      // 同时支持同时上传不同的文件
+      TransferManager transferManager = new TransferManager(cosClient);
+      //File localFile = new File("src/test/resources/len30M.txt");
+      ObjectMetadata  objectMetadata = new ObjectMetadata();
+      objectMetadata.setContentLength(bytes.length);
+      objectMetadata.setContentEncoding(this.encoding);
+      // transfermanger upload是异步上传
+      Upload upload = transferManager.upload(bucketName, key, inputStream,objectMetadata);
+      // 等待传输结束
+      upload.waitForCompletion();
+      transferManager.shutdownNow();
+      log.info("Qcloud Cos {} object {} for upload status:{}.",
+        value("group", group),
+        value("key", key),
+        upload.getState().toString());
+    } catch (CosClientException se) {
+      logStorageException(se, key);
+    }catch (Exception e) {
+      log.error("Qcloud Cos Failed to retrieve {} object: {}: {}",
+        value("group", group),
+        value("key", key),
+        value("exception", e.getMessage()));
+    }
   }
 
 
@@ -241,11 +295,11 @@ public class QcloudStorageService implements StorageService {
     String errorMsg = cosClientException.getMessage();
     String localizeErrorMsg = cosClientException.getLocalizedMessage();
     if (key.isEmpty()) {
-      log.error("Exception occurred accessing object(s) from storage: localizeErrorMsg: {} {}",
+      log.error("Qcloud Cos Exception occurred accessing object(s) from storage: localizeErrorMsg: {} {}",
         value("localizeErrorMsg", localizeErrorMsg),
         value("errorMsg", errorMsg));
     } else {
-      log.error("Exception occurred accessing object(s) from storage: localizeErrorMsg: {} {}",
+      log.error("Qcloud Cos Exception occurred accessing object(s) from storage: localizeErrorMsg: {} {}",
         value("key", key),
         value("localizeErrorMsg", localizeErrorMsg),
         value("errorMsg", errorMsg));
